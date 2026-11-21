@@ -19,6 +19,11 @@ jobs:
   #
   # Skipped jobs count as passing for a required status check, so branch
   # protection on main isn't blocked by a skipped run.
+  #
+  # A pull request is different: Dependabot opens some before setup has run,
+  # and skipped jobs would show them as passing without testing them. So on a
+  # pull request this job fails instead, until the pull request is rebased
+  # onto the set-up app (Layered asks Dependabot to, once setup is merged).
   setup_status:
     runs-on: ubuntu-latest
     outputs:
@@ -34,9 +39,13 @@ jobs:
         id: check
         env:
           IS_TEMPLATE: ${{ github.repository == 'layered-ai-public/layered-foundation-rails' }}
+          EVENT: ${{ github.event_name }}
         run: |
           if [ "$IS_TEMPLATE" = "true" ] || [ ! -f lib/tasks/layered/foundation/setup.rake ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "pull_request" ]; then
+            echo "::error::This pull request is based on the app from before setup ran, so CI can't test it. Rebase it onto the default branch once setup's pull request is merged (for Dependabot, comment @dependabot rebase)."
+            exit 1
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Setup hasn't run yet, so CI is skipped. It runs in full on the setup pull request."
