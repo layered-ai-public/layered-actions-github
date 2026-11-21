@@ -2,22 +2,26 @@
 
 The GitHub Actions workflows every [Layered](https://github.com/layered-ai-public) app runs, kept in one place so a change here reaches every app.
 
-Each app, generated from [layered-foundation-rails](https://github.com/layered-ai-public/layered-foundation-rails), has a short file of the same name in its own `.github/workflows` that calls one of these as a [reusable workflow](https://docs.github.com/en/actions/sharing-automations/reusing-workflows). The app's file keeps what GitHub needs in the app's repository: the triggers, the run's name (which is how Layered finds a run it started), permissions, concurrency, and the secrets passed on. The steps are here.
+Each app, generated from [layered-foundation-rails](https://github.com/layered-ai-public/layered-foundation-rails), has a short file of the same name in its own `.github/workflows` that uses one of these. The app's file keeps what GitHub needs in the app's repository: the triggers, the run's name (which is how Layered finds a run it started), permissions, concurrency, and the secrets passed on. The steps are here.
 
-| Workflow | Runs |
+Most are [reusable workflows](https://docs.github.com/en/actions/sharing-automations/reusing-workflows), in `.github/workflows`. The three that work on a server are [composite actions](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action), each in a directory of its own, for the reason under [Secrets](#secrets).
+
+| Workflow or action | Runs |
 | --- | --- |
 | `ci.yml` | Brakeman, bundler-audit, importmap audit, RuboCop, tests and system tests |
 | `setup.yml` | The one-time setup task that renames a new app, on a branch with a pull request |
-| `deploy.yml` | `bin/kamal setup` in a GitHub Environment |
-| `remove.yml` | Takes an environment off its server |
-| `server-keys.yml` | Puts a project's deploy keys on a server another environment already deploys to |
+| `deploy` | `bin/kamal setup` in a GitHub Environment |
+| `remove` | Takes an environment off its server |
+| `server-keys` | Puts a project's deploy keys on a server another environment already deploys to |
 | `claude.yml` | Claude Code, on an `@claude` mention |
 | `codex.yml` | Codex, on an issue mentioning `@codex` |
 | `opencode.yml` | opencode, on a `/opencode` mention |
 
 ## Secrets
 
-`deploy.yml`, `remove.yml` and `server-keys.yml` read the secrets and variables of the environment they run in, in the app's repository, so nothing is passed to them. The coding agents' workflows take the app's repository secrets by name, as `secrets: inherit` only works between repositories with the same owner, and apps aren't owned by this repository's. A new secret has to be declared here and passed by each app's file.
+The coding agents' workflows take the app's repository secrets by name, as `secrets: inherit` only works between repositories with the same owner, and apps aren't owned by this repository's. A new secret has to be declared here and passed by each app's file.
+
+`deploy`, `remove` and `server-keys` need the secrets of the GitHub Environment being deployed, which Layered writes there. GitHub gives those only to a job in the app's own repository that names the environment: a reusable workflow owned by someone else gets the environment's variables but none of its secrets, and the app's file can't pass them, since a job that calls a workflow can't name an environment. So these three are composite actions. The job stays in the app's file, naming the environment, and passes `SSH_PRIVATE_KEY` and `RAILS_MASTER_KEY` to the action as inputs.
 
 Every app trusts this repository with its deploy keys, its Rails master key and its agents' API keys. Keep write access to it, and to its tags, to as few people as can manage it.
 
