@@ -1,0 +1,110 @@
+name: Authorize deploy keys
+
+# Layered runs this to let a new environment deploy to a server another
+# environment already deploys to, so nobody has to log in to add its key. It
+# logs in with this environment's key, already on the server, and replaces the
+# keys Layered added there for the project (labelled layered-deploy and the
+# project) with the ones given: every environment of the project deploying
+# there. Another project's keys, and keys added any other way, are left alone.
+
+# Called from the app's own .github/workflows/server-keys.yml, which keeps
+# the trigger, the run's name and the concurrency group; this file is the rest.
+#
+# Its secrets and variables are the environment's, in the calling
+# repository: a job naming an environment reads them, so nothing is passed.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment whose key is on the server
+        required: true
+        type: string
+      server:
+        description: The server's IP, which must be the environment's
+        required: true
+        type: string
+      project:
+        description: The Layered project the keys are for, such as p12
+        required: true
+        type: string
+      authorized_keys:
+        description: Every key of the project deploying to the server, one per line
+        required: true
+        type: string
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 5
+    env:
+      KAMAL_DEPLOY_IP: ${{ vars.KAMAL_DEPLOY_IP }}
+      KAMAL_DEPLOY_DOMAIN: ${{ vars.KAMAL_DEPLOY_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Builds the script run on the server, with the keys in it. Only Layered's
+      # labelled public keys for the project, one to a line, so nothing else
+      # gets in.
+      #
+      # On the server, the script keeps every line of authorized_keys but the
+      # project's own, then adds the project's keys. It holds
+      # ~/.ssh/.layered.lock while it does, as remove.yml does taking a key
+      # off, so runs for other projects and apps on the server wait rather
+      # than overwrite each other's changes.
+      - name: Check the keys
+        env:
+          SERVER: ${{ inputs.server }}
+          PROJECT: ${{ inputs.project }}
+          AUTHORIZED_KEYS: ${{ inputs.authorized_keys }}
+        run: |
+          if [ "$SERVER" != "$KAMAL_DEPLOY_IP" ]; then
+            echo "::error::This environment deploys to $KAMAL_DEPLOY_IP, not $SERVER."
+            exit 1
+          fi
+          if ! printf '%s' "$PROJECT" | grep -qE '^p[0-9]+$'; then
+            echo "::error::$PROJECT isn't a Layered project."
+            exit 1
+          fi
+          printf '%s\n' "$AUTHORIZED_KEYS" | sed '/^$/d' > "$RUNNER_TEMP/authorized_keys"
+          if grep -vE "^ssh-(rsa|ed25519) [A-Za-z0-9+/=]+ layered-deploy $PROJECT [a-z0-9_-]+/[a-z0-9_-]+\$" "$RUNNER_TEMP/authorized_keys"; then
+            echo "::error::Those lines aren't Layered deploy keys for $PROJECT."
+            exit 1
+          fi
+          {
+            echo "tag=' layered-deploy $PROJECT '"
+            # Its own file, as another project's run may be writing one too.
+            echo 'keys=$(mktemp)'
+            echo "cat > \"\$keys\" <<'KEYS'"
+            cat "$RUNNER_TEMP/authorized_keys"
+            echo "KEYS"
+            cat <<'SCRIPT'
+          set -e
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          command -v flock > /dev/null || { echo "flock isn't installed on the server (it's in util-linux)" >&2; exit 1; }
+          exec 9> ~/.ssh/.layered.lock
+          flock -w 120 9 || { echo "Timed out waiting for another change to the server's keys" >&2; exit 1; }
+          touch ~/.ssh/authorized_keys
+          grep -vF -e "$tag" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.layered || [ $? -eq 1 ]
+          cat "$keys" >> ~/.ssh/authorized_keys.layered
+          rm "$keys"
+          chmod 600 ~/.ssh/authorized_keys.layered
+          mv ~/.ssh/authorized_keys.layered ~/.ssh/authorized_keys
+          SCRIPT
+          } > "$RUNNER_TEMP/authorize.sh"
+
+      - name: Write the deploy key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      # Logs in as config/deploy.yml's ssh user, as Kamal does.
+      - name: Replace the project's keys on the server
+        run: |
+          user=$(ruby -ryaml -rerb -e 'puts YAML.load(ERB.new(File.read("config/deploy.yml")).result).dig("ssh", "user") || "root"')
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "$user@$KAMAL_DEPLOY_IP" 'sh -s' < "$RUNNER_TEMP/authorize.sh"
