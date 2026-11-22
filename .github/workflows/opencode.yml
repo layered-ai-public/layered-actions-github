@@ -24,6 +24,11 @@ name: opencode
 # (Settings → Secrets and variables → Actions → Variables), else
 # anthropic/claude-sonnet-5-5.
 #
+# A line `Base: "<branch>"` in an issue starts the work from that branch
+# rather than the default branch: Layered writes one into the issue of a
+# build's follow-up, naming the branch of the build it adds to. It's read
+# from an issue only, never a comment or a pull request.
+#
 # It needs the API key for the model's provider as a repository secret, one
 # of these, each of which can be given to opencode alone as OPENCODE_<name>
 # (e.g. OPENCODE_ANTHROPIC_API_KEY), which is read first. Layered writes those,
@@ -163,11 +168,26 @@ jobs:
               ;;
           esac
 
+      # The last such line wins, as the model's does. Only a branch name's
+      # characters are taken, none starting with a dash and no "..", as the
+      # issue is anyone's who can open one. Empty is the default branch.
+      - name: Read the base
+        if: github.event_name == 'issues'
+        id: base
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          base=$(printf '%s\n' "$ISSUE_BODY" | sed -nE 's#^[[:space:]]*Base:[[:space:]]*"([A-Za-z0-9._/][A-Za-z0-9._/-]*)"[[:space:]]*$#\1#p' | tail -n 1)
+          case "$base" in *..*) base= ;; esac
+          echo "branch=$base" >> "$GITHUB_OUTPUT"
+
       # On a pull request, opencode pushes with the credentials checkout leaves
       # in .git/config. On an issue it has no need of them; the push below
-      # brings its own.
+      # brings its own. On an issue, the branch started below is cut from
+      # what's checked out: the base, if there's one.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ steps.base.outputs.branch }}
           fetch-depth: 1
           persist-credentials: ${{ github.event_name != 'issues' }}
 

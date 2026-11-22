@@ -13,6 +13,11 @@ name: Codex
 # `Model: "gpt-6.1-sol"`. Layered writes one into each issue it opens. Without
 # one, Codex runs its own default.
 #
+# A line `Base: "<branch>"` in an issue starts the work from that branch
+# rather than the default branch: Layered writes one into the issue of a
+# build's follow-up, naming the branch of the build it adds to. It's read
+# from an issue only, never a comment or a pull request.
+#
 # Codex only answers people with write access to the repository; the action
 # checks. It runs without network access, so everything it needs is installed
 # before it starts. Pushes made with this workflow's GITHUB_TOKEN don't
@@ -54,10 +59,24 @@ jobs:
             exit 1
           fi
 
+      # The last such line wins, as the model's does. Only a branch name's
+      # characters are taken, none starting with a dash and no "..", as the
+      # issue is anyone's who can open one. Empty is the default branch.
+      - name: Read the base
+        id: base
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          base=$(printf '%s\n' "$ISSUE_BODY" | sed -nE 's#^[[:space:]]*Base:[[:space:]]*"([A-Za-z0-9._/][A-Za-z0-9._/-]*)"[[:space:]]*$#\1#p' | tail -n 1)
+          case "$base" in *..*) base= ;; esac
+          echo "branch=$base" >> "$GITHUB_OUTPUT"
+
       # Codex has no need of the token, so it isn't left in the checkout for
-      # it to find; the push below brings its own.
+      # it to find; the push below brings its own. The branch started below is
+      # cut from what's checked out: the base, if there's one.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ steps.base.outputs.branch }}
           fetch-depth: 1
           persist-credentials: false
 
