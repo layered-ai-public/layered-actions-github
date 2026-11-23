@@ -194,7 +194,7 @@ jobs:
           codex-home: ${{ steps.others.outputs.folders != '' && format('{0}/codex-home', runner.temp) || '' }}
           prompt: |
             You're working on issue #${{ github.event.issue.number }} in ${{ github.repository }}.
-            Make the change it asks for in this checkout.
+            Make the change it asks for, in this checkout and wherever else the issue says.
 
             Follow AGENTS.md. Check your work with the tests and rubocop, as bin/ci does.
 

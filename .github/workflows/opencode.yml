@@ -312,17 +312,22 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           # Outside this checkout, opencode asks first, and with no one to
-          # answer it refuses: the app's other repositories are allowed.
+          # answer it refuses: the app's other repositories are allowed, and
+          # the folder they're in with this checkout, which holds nothing
+          # else, so it can look for them there.
           config="$RUNNER_TEMP/opencode.json"
-          printf '%s\n' "$FOLDERS" | jq -R -s '{"$schema": "https://opencode.ai/config.json",
-            permission: {edit: "allow", bash: "allow",
-              external_directory: (split("\n") | map(select(startswith("/"))) | map({key: "\(.)/**", value: "allow"}) | from_entries)}}
+          printf '%s\n' "$FOLDERS" | jq -R -s --arg parent "$(dirname "$GITHUB_WORKSPACE")" '
+            (split("\n") | map(select(startswith("/")))) as $folders
+            | {"$schema": "https://opencode.ai/config.json",
+               permission: {edit: "allow", bash: "allow",
+                 external_directory: ($folders | map({key: "\(.)/**", value: "allow"}) | from_entries
+                   | if . == {} then . else . + {"\($parent)/*": "allow"} end)}}
             | if .permission.external_directory == {} then del(.permission.external_directory) else . end' > "$config"
 
           prompt="$RUNNER_TEMP/prompt.md"
           cat > "$prompt" <<PROMPT
           You're working on issue #${ISSUE_NUMBER} in ${GITHUB_REPOSITORY}.
-          Make the change it asks for in this checkout.
+          Make the change it asks for, in this checkout and wherever else the issue says.
 
           Follow AGENTS.md. Check your work with the tests and rubocop, as bin/ci does.
 
