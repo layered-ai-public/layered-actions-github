@@ -47,6 +47,9 @@ jobs:
     permissions:
       contents: write
       issues: write
+      # Proves to Layered which repository and workflow this is, for the
+      # app's other repositories (see other-repositories/action.yml).
+      id-token: write
     steps:
       # An unset secret arrives as an empty string, and the action's own error
       # for that doesn't say where to set one.
@@ -59,16 +62,34 @@ jobs:
             exit 1
           fi
 
+      # Before anything is checked out or run: the agent's action checks this
+      # too, but only once the steps before it have run, Bundler and all.
+      - name: Check the asker can write
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASKER: ${{ github.event.sender.login }}
+        run: |
+          permission=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ASKER}/permission" --jq .permission)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "::error::$ASKER can't write to the repository, so Codex won't answer them."
+              exit 1
+              ;;
+          esac
+
       # The last such line wins, as the model's does. Only a branch name's
-      # characters are taken, none starting with a dash and no "..", as the
-      # issue is anyone's who can open one. Empty is the default branch.
+      # characters are taken, none starting with a dash, no "..", and nothing
+      # under refs/, as the issue is anyone's who can open one: it's checked out
+      # as a branch of this repository, never a pull request's ref, say, which
+      # would run a fork's code. Empty is the default branch.
       - name: Read the base
         id: base
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           base=$(printf '%s\n' "$ISSUE_BODY" | sed -nE 's#^[[:space:]]*Base:[[:space:]]*"([A-Za-z0-9._/][A-Za-z0-9._/-]*)"[[:space:]]*$#\1#p' | tail -n 1)
-          case "$base" in *..*) base= ;; esac
+          case "$base" in *..*|refs/*) base= ;; esac
           echo "branch=$base" >> "$GITHUB_OUTPUT"
 
       # Codex has no need of the token, so it isn't left in the checkout for
@@ -76,9 +97,32 @@ jobs:
       # cut from what's checked out: the base, if there's one.
       - uses: actions/checkout@v6
         with:
-          ref: ${{ steps.base.outputs.branch }}
+          ref: ${{ steps.base.outputs.branch && format('refs/heads/{0}', steps.base.outputs.branch) || '' }}
           fetch-depth: 1
           persist-credentials: false
+
+      # The app's other repositories, beside this checkout, for Codex to read.
+      - name: Check out the app's other repositories
+        id: others
+        uses: layered-ai-public/layered-actions-github/other-repositories@v1
+        with:
+          layered-url: ${{ vars.LAYERED_URL }}
+
+      # The action refuses --add-dir alongside a permission profile, so a
+      # profile of our own extends :workspace with each of them as a workspace
+      # root. A folder not listed stays out of reach, and their .git, like
+      # this checkout's, stays read-only.
+      - name: Let Codex reach them
+        if: steps.others.outputs.folders != ''
+        env:
+          FOLDERS: ${{ steps.others.outputs.folders }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/codex-home"
+          {
+            printf '[permissions.layered]\nextends = ":workspace"\n\n[permissions.layered.workspace_roots]\n'
+            printf '%s\n' "$FOLDERS" | sed -n 's#^\(/.*\)$#"\1" = true#p'
+          } > "$RUNNER_TEMP/codex-home/config.toml"
+          cat "$RUNNER_TEMP/codex-home/config.toml"
 
       # The runners point apt at Azure's Ubuntu mirror
       # (azure.archive.ubuntu.com), which is often very slow. Use
@@ -144,7 +188,8 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           # Empty, as when the issue names none, is the action's own default.
           model: ${{ steps.model.outputs.id }}
-          permission-profile: ":workspace"
+          permission-profile: ${{ steps.others.outputs.folders != '' && 'layered' || ':workspace' }}
+          codex-home: ${{ steps.others.outputs.folders != '' && format('{0}/codex-home', runner.temp) || '' }}
           prompt: |
             You're working on issue #${{ github.event.issue.number }} in ${{ github.repository }}.
             Make the change it asks for in this checkout.

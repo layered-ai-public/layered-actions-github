@@ -17,6 +17,11 @@ name: Claude
 # Layered writes one into each issue it opens, and each pull request it opens
 # for a change. Without one, Claude Code runs its own default.
 #
+# On an issue Layered opened, the app's other repositories are checked out
+# beside this one for Claude to read (see other-repositories/action.yml),
+# when the repository has Layered's LAYERED_URL variable. The app's own
+# workflow has to grant id-token: write for that.
+#
 # A line `Base: "<branch>"` in an issue starts the work from that branch
 # rather than the default branch: Layered writes one into the issue of a
 # build's follow-up, naming the branch of the build it adds to. It's read
@@ -57,6 +62,9 @@ jobs:
       issues: write
       # Lets Claude read CI results on pull requests.
       actions: read
+      # Proves to Layered which repository and workflow this is, for the
+      # app's other repositories (see other-repositories/action.yml).
+      id-token: write
     steps:
       # An unset secret arrives as an empty string, and the action's own error
       # for that doesn't say where to set one.
@@ -70,9 +78,27 @@ jobs:
             exit 1
           fi
 
+      # Before anything is checked out or run: the agent's action checks this
+      # too, but only once the steps before it have run, Bundler and all.
+      - name: Check the asker can write
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASKER: ${{ github.event.sender.login }}
+        run: |
+          permission=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ASKER}/permission" --jq .permission)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "::error::$ASKER can't write to the repository, so Claude won't answer them."
+              exit 1
+              ;;
+          esac
+
       # The last such line wins, as the model's does. Only a branch name's
-      # characters are taken, none starting with a dash and no "..", as the
-      # issue is anyone's who can open one. Empty is the default branch.
+      # characters are taken, none starting with a dash, no "..", and nothing
+      # under refs/, as the issue is anyone's who can open one: it's checked out
+      # as a branch of this repository, never a pull request's ref, say, which
+      # would run a fork's code. Empty is the default branch.
       - name: Read the base
         if: github.event_name == 'issues'
         id: base
@@ -80,13 +106,30 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           base=$(printf '%s\n' "$ISSUE_BODY" | sed -nE 's#^[[:space:]]*Base:[[:space:]]*"([A-Za-z0-9._/][A-Za-z0-9._/-]*)"[[:space:]]*$#\1#p' | tail -n 1)
-          case "$base" in *..*) base= ;; esac
+          case "$base" in *..*|refs/*) base= ;; esac
           echo "branch=$base" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
         with:
-          ref: ${{ steps.base.outputs.branch }}
+          ref: ${{ steps.base.outputs.branch && format('refs/heads/{0}', steps.base.outputs.branch) || '' }}
           fetch-depth: 1
+
+      # The app's other repositories, beside this checkout, for Claude to read.
+      # Only on an issue, which is how Layered starts a run.
+      - name: Check out the app's other repositories
+        if: github.event_name == 'issues'
+        id: others
+        uses: layered-ai-public/layered-actions-github/other-repositories@v1
+        with:
+          layered-url: ${{ vars.LAYERED_URL }}
+
+      - name: Let Claude reach them
+        id: add_dirs
+        env:
+          FOLDERS: ${{ steps.others.outputs.folders }}
+        run: |
+          args=$(printf '%s\n' "$FOLDERS" | sed -n 's#^\(/.*\)$#--add-dir \1#p' | paste -sd ' ' -)
+          echo "args=$args" >> "$GITHUB_OUTPUT"
 
       # The runners point apt at Azure's Ubuntu mirror
       # (azure.archive.ubuntu.com), which is often very slow. Use
@@ -158,4 +201,5 @@ jobs:
           # the action only answers people with write access to the repository.
           claude_args: |
             --allowedTools "Bash"
+            ${{ steps.add_dirs.outputs.args }}
             ${{ steps.model.outputs.id && format('--model {0}', steps.model.outputs.id) || '' }}

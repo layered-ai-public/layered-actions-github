@@ -1,0 +1,106 @@
+name: Other repositories
+description: >
+  Checks out the app's other repositories beside this one, read-only, for a
+  coding agent to read as it works on an issue Layered opened.
+
+# Layered says which repositories, and gives a token that reads only them, in
+# answer to GitHub's identity token for this job, which names the workflow run:
+# Layered gives access only to the run GitHub started for an issue Layered
+# opened, and only to that run from then on. The token is made out to
+# LAYERED_URL, and Layered refuses one made out to anywhere else, so it's no
+# use to whoever a wrong URL would send it to. LAYERED_URL is the repository
+# variable Layered writes, never anything in the issue, which is anyone's who
+# can open one; and Layered, not the issue, says what to check out.
+#
+# Each is cloned beside the checkout, in ../<name>, with the token given to
+# the clone only, and revoked once they're cloned, so the agent never holds
+# a token that works. Nothing here fails the run:
+# without LAYERED_URL, or if Layered says no, the agent works on this
+# repository alone, as before.
+#
+# The job needs the id-token: write permission, which the app's own workflow
+# has to grant too.
+
+inputs:
+  layered-url:
+    description: "Where Layered is served: the LAYERED_URL repository variable."
+    required: false
+    default: ""
+
+outputs:
+  folders:
+    description: "Each repository's folder, an absolute path, one to a line. Empty when there are none."
+    value: ${{ steps.clone.outputs.folders }}
+  repositories:
+    description: "Each repository's owner/name, one to a line."
+    value: ${{ steps.clone.outputs.repositories }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check out the app's other repositories
+      id: clone
+      shell: bash
+      env:
+        LAYERED_URL: ${{ inputs.layered-url }}
+      run: |
+        set -uo pipefail
+        url=${LAYERED_URL%/}
+        if [ -z "$url" ]; then
+          echo "No LAYERED_URL variable, so the agent works on this repository alone."
+          exit 0
+        fi
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::warning::The job has no id-token: write permission, so the agent works on this repository alone. Grant it in this repository's workflow."
+          exit 0
+        fi
+
+        if ! identity=$(curl -sSf -G --data-urlencode "audience=$url" \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value); then
+          echo "::warning::GitHub gave no identity token, so the agent works on this repository alone."
+          exit 0
+        fi
+        echo "::add-mask::$identity"
+
+        answer=$(jq -n --arg token "$identity" '{token: $token}' |
+          curl -sS --fail-with-body -X POST -H "Content-Type: application/json" --data @- "$url/github/workflow_access")
+        if [ $? -ne 0 ]; then
+          echo "::warning::Layered gave no access to the app's other repositories, so the agent works on this repository alone: $(jq -r '.error // empty' <<<"$answer" 2>/dev/null || echo "$answer")"
+          exit 0
+        fi
+        token=$(jq -r '.token // empty' <<<"$answer")
+        [ -n "$token" ] && echo "::add-mask::$token"
+        if [ "$(jq '.repositories | length' <<<"$answer")" = 0 ]; then
+          echo "The app has no other repositories this run can reach."
+          exit 0
+        fi
+
+        auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+        parent=$(dirname "$GITHUB_WORKSPACE")
+        folders=() repositories=()
+        while read -r repository; do
+          full_name=$(jq -r .full_name <<<"$repository")
+          name=${full_name#*/}
+          # Beside this checkout, by a name that can't climb out of it.
+          if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ || "$name" == .* ]]; then
+            echo "::warning::Skipped $full_name, whose name can't be a folder here."
+            continue
+          fi
+          folder="$parent/$name"
+          if git -c http.extraheader="$auth" clone -q --depth 1 "https://github.com/$full_name.git" "$folder"; then
+            folders+=("$folder") repositories+=("$full_name")
+            echo "Checked out $full_name in ../$name"
+          else
+            echo "::warning::Couldn't check out $full_name."
+          fi
+        done < <(jq -c '.repositories[]' <<<"$answer")
+
+        # It lasts an hour otherwise; nothing after this needs it.
+        curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" \
+          https://api.github.com/installation/token || echo "::warning::Couldn't revoke the token that read them."
+
+        [ ${#folders[@]} -gt 0 ] || exit 0
+        {
+          echo "folders<<FOLDERS"; printf '%s\n' "${folders[@]}"; echo "FOLDERS"
+          echo "repositories<<REPOSITORIES"; printf '%s\n' "${repositories[@]}"; echo "REPOSITORIES"
+        } >> "$GITHUB_OUTPUT"

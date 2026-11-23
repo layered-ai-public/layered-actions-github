@@ -128,6 +128,9 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      # Proves to Layered which repository and workflow this is, for the
+      # app's other repositories (see other-repositories/action.yml).
+      id-token: write
     steps:
       # An unset secret arrives as an empty string, and opencode's own error for
       # a missing key doesn't say where to set one.
@@ -169,8 +172,10 @@ jobs:
           esac
 
       # The last such line wins, as the model's does. Only a branch name's
-      # characters are taken, none starting with a dash and no "..", as the
-      # issue is anyone's who can open one. Empty is the default branch.
+      # characters are taken, none starting with a dash, no "..", and nothing
+      # under refs/, as the issue is anyone's who can open one: it's checked out
+      # as a branch of this repository, never a pull request's ref, say, which
+      # would run a fork's code. Empty is the default branch.
       - name: Read the base
         if: github.event_name == 'issues'
         id: base
@@ -178,7 +183,7 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           base=$(printf '%s\n' "$ISSUE_BODY" | sed -nE 's#^[[:space:]]*Base:[[:space:]]*"([A-Za-z0-9._/][A-Za-z0-9._/-]*)"[[:space:]]*$#\1#p' | tail -n 1)
-          case "$base" in *..*) base= ;; esac
+          case "$base" in *..*|refs/*) base= ;; esac
           echo "branch=$base" >> "$GITHUB_OUTPUT"
 
       # On a pull request, opencode pushes with the credentials checkout leaves
@@ -187,9 +192,18 @@ jobs:
       # what's checked out: the base, if there's one.
       - uses: actions/checkout@v6
         with:
-          ref: ${{ steps.base.outputs.branch }}
+          ref: ${{ steps.base.outputs.branch && format('refs/heads/{0}', steps.base.outputs.branch) || '' }}
           fetch-depth: 1
           persist-credentials: ${{ github.event_name != 'issues' }}
+
+      # The app's other repositories, beside this checkout, for opencode to
+      # read. Only on an issue, which is how Layered starts a run.
+      - name: Check out the app's other repositories
+        if: github.event_name == 'issues'
+        id: others
+        uses: layered-ai-public/layered-actions-github/other-repositories@v1
+        with:
+          layered-url: ${{ vars.LAYERED_URL }}
 
       # opencode commits as whoever git is configured as, and only configures
       # that itself when it uses the opencode GitHub App.
@@ -290,12 +304,18 @@ jobs:
           MISTRAL_API_KEY: ${{ secrets.OPENCODE_MISTRAL_API_KEY || secrets.MISTRAL_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           MODEL: ${{ steps.model.outputs.id }}
+          FOLDERS: ${{ steps.others.outputs.folders }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
+          # Outside this checkout, opencode asks first, and with no one to
+          # answer it refuses: the app's other repositories are allowed.
           config="$RUNNER_TEMP/opencode.json"
-          echo '{"$schema": "https://opencode.ai/config.json", "permission": {"edit": "allow", "bash": "allow"}}' > "$config"
+          printf '%s\n' "$FOLDERS" | jq -R -s '{"$schema": "https://opencode.ai/config.json",
+            permission: {edit: "allow", bash: "allow",
+              external_directory: (split("\n") | map(select(startswith("/"))) | map({key: "\(.)/**", value: "allow"}) | from_entries)}}
+            | if .permission.external_directory == {} then del(.permission.external_directory) else . end' > "$config"
 
           prompt="$RUNNER_TEMP/prompt.md"
           cat > "$prompt" <<PROMPT
