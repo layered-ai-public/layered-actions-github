@@ -50,6 +50,8 @@ jobs:
       # Proves to Layered which repository and workflow this is, for the
       # app's other repositories (see other-repositories/action.yml).
       id-token: write
+    outputs:
+      changed: ${{ steps.hand_over.outputs.changed }}
     steps:
       # An unset secret arrives as an empty string, and the action's own error
       # for that doesn't say where to set one.
@@ -101,7 +103,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # The app's other repositories, beside this checkout, for Codex to read.
+      # The app's other repositories, beside this checkout, for Codex to read and change.
       - name: Check out the app's other repositories
         id: others
         uses: layered-ai-public/layered-actions-github/other-repositories@v1
@@ -225,6 +227,15 @@ jobs:
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
+      # What the agent changed in the app's other repositories, for the
+      # publish job to push (see hand-over-changes/action.yml).
+      - name: Hand over the changes to the other repositories
+        if: github.event_name == 'issues' && steps.others.outputs.bases != ''
+        id: hand_over
+        uses: layered-ai-public/layered-actions-github/hand-over-changes@v1
+        with:
+          bases: ${{ steps.others.outputs.bases }}
+
       - name: Answer on the issue
         if: always() && steps.codex.outcome != 'skipped'
         env:
@@ -252,3 +263,11 @@ jobs:
             echo "<!-- $RUN_URL -->"
           } > reply.md
           gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file reply.md
+
+  # Pushes them, in a job of its own (see publish.yml).
+  publish:
+    needs: codex
+    if: needs.codex.outputs.changed == 'true'
+    permissions:
+      id-token: write
+    uses: layered-ai-public/layered-actions-github/.github/workflows/publish.yml@v1

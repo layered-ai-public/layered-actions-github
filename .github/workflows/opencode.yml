@@ -131,6 +131,8 @@ jobs:
       # Proves to Layered which repository and workflow this is, for the
       # app's other repositories (see other-repositories/action.yml).
       id-token: write
+    outputs:
+      changed: ${{ steps.hand_over.outputs.changed }}
     steps:
       # An unset secret arrives as an empty string, and opencode's own error for
       # a missing key doesn't say where to set one.
@@ -197,7 +199,7 @@ jobs:
           persist-credentials: ${{ github.event_name != 'issues' }}
 
       # The app's other repositories, beside this checkout, for opencode to
-      # read. Only on an issue, which is how Layered starts a run.
+      # read and change. Only on an issue, which is how Layered starts a run.
       - name: Check out the app's other repositories
         if: github.event_name == 'issues'
         id: others
@@ -366,6 +368,15 @@ jobs:
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
+      # What the agent changed in the app's other repositories, for the
+      # publish job to push (see hand-over-changes/action.yml).
+      - name: Hand over the changes to the other repositories
+        if: github.event_name == 'issues' && steps.others.outputs.bases != ''
+        id: hand_over
+        uses: layered-ai-public/layered-actions-github/hand-over-changes@v1
+        with:
+          bases: ${{ steps.others.outputs.bases }}
+
       - name: Answer on the issue
         if: always() && github.event_name == 'issues' && steps.opencode.outcome != 'skipped'
         env:
@@ -439,3 +450,11 @@ jobs:
           use_github_token: true
           mentions: /opencode
           prompt: ${{ steps.prompt.outputs.text }}
+
+  # Pushes them, in a job of its own (see publish.yml).
+  publish:
+    needs: opencode
+    if: needs.opencode.outputs.changed == 'true'
+    permissions:
+      id-token: write
+    uses: layered-ai-public/layered-actions-github/.github/workflows/publish.yml@v1

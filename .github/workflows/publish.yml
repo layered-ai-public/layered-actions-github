@@ -1,0 +1,103 @@
+name: Publish
+
+# Pushes what a coding agent changed in the app's other repositories, each to
+# a branch there, for Layered to show and open a pull request from. Called
+# from an agent's workflow (claude.yml, codex.yml, opencode.yml) once its job
+# has handed the changes over as patches (see hand-over-changes/action.yml).
+#
+# A job of its own, on a runner of its own, so nothing the agent ran can be
+# here to take the token that writes. Layered gives that token only to this
+# workflow, at the tag the apps call, by GitHub's identity token for the job,
+# which names it, and only for a run whose agent's job Layered already let
+# read them, in the same workflow run (see WorkflowAccess in Layered). The
+# token writes contents and no more, so nothing pushed can change a
+# repository's workflows.
+#
+# It runs nothing from the repositories or the patches: each patch is applied
+# with git to the commit the agent started from, in a fresh repository, and
+# pushed to the branch Layered names. A patch that doesn't apply fails the
+# job, which fails the run.
+
+on:
+  workflow_call:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - name: Fetch the changes
+        uses: actions/download-artifact@v4
+        with:
+          name: other-repositories-changes
+          path: ${{ runner.temp }}/other-repositories-changes
+
+      - name: Push them
+        env:
+          LAYERED_URL: ${{ vars.LAYERED_URL }}
+          # Nothing of the repositories' own is fetched beyond the commit.
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: |
+          set -uo pipefail
+          url=${LAYERED_URL%/}
+          dir="$RUNNER_TEMP/other-repositories-changes"
+          if [ -z "$url" ]; then
+            echo "::error::No LAYERED_URL variable, so there's nowhere to ask for a token that pushes."
+            exit 1
+          fi
+
+          identity=$(curl -sSf -G --data-urlencode "audience=$url" \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value) || {
+            echo "::error::GitHub gave no identity token."
+            exit 1
+          }
+          echo "::add-mask::$identity"
+
+          answer=$(jq -n --arg token "$identity" '{token: $token}' |
+            curl -sS --fail-with-body -X POST -H "Content-Type: application/json" --data @- "$url/github/workflow_access")
+          if [ $? -ne 0 ]; then
+            echo "::error::Layered gave no token to push with: $(jq -r '.error // empty' <<<"$answer" 2>/dev/null || echo "$answer")"
+            exit 1
+          fi
+          token=$(jq -r '.token // empty' <<<"$answer")
+          [ -n "$token" ] && echo "::add-mask::$token"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+
+          failed=0
+          while read -r repository; do
+            full_name=$(jq -r .full_name <<<"$repository")
+            branch=$(jq -r .branch <<<"$repository")
+            message=$(jq -r .message <<<"$repository")
+            name=${full_name#*/}
+            patch="$dir/$name.patch"
+            [ -f "$patch" ] || continue
+            base=$(cat "$dir/$name.base")
+            if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ || "$name" == .* || ! "$base" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Skipped $full_name, whose name or starting commit isn't one."
+              failed=1
+              continue
+            fi
+
+            work=$(mktemp -d)
+            if git init -q "$work" &&
+               git -C "$work" -c http.extraheader="$auth" fetch -q --depth 1 "https://github.com/$full_name.git" "$base" &&
+               git -C "$work" checkout -q --detach FETCH_HEAD &&
+               git -C "$work" apply --index --binary "$patch" &&
+               git -C "$work" -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                 commit -q --no-verify -m "$message" &&
+               git -C "$work" -c http.extraheader="$auth" push -q "https://github.com/$full_name.git" "HEAD:refs/heads/$branch"; then
+              echo "Pushed the changes to $full_name to $branch"
+            else
+              echo "::error::Couldn't push the changes to $full_name."
+              failed=1
+            fi
+          done < <(jq -c '.repositories[]' <<<"$answer")
+
+          # It lasts an hour otherwise; nothing after this needs it.
+          if [ -n "$token" ]; then
+            curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" \
+              https://api.github.com/installation/token || echo "::warning::Couldn't revoke the token that pushed them."
+          fi
+          exit $failed

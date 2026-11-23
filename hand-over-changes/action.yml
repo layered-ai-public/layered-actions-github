@@ -1,0 +1,63 @@
+name: Hand over changes
+description: >
+  Hands over what a coding agent changed in the app's other repositories, as
+  a patch for each, for the publish workflow to push from a job of its own.
+
+# The agent's job holds no token that writes to the other repositories: the
+# agent runs there, with a shell, and could take one. So what it changed in
+# each is left as a patch, against the commit other-repositories checked out,
+# in an artifact of the workflow run, and the publish workflow pushes it (see
+# .github/workflows/publish.yml). Whatever the agent left, committed or not,
+# is in the patch, bar changes to the repository's workflows, which the
+# publish job's token couldn't push anyway.
+
+inputs:
+  bases:
+    description: "other-repositories' bases output: each repository's owner/name and the commit it was checked out at."
+    required: true
+
+outputs:
+  changed:
+    description: "true when the agent changed any of them."
+    value: ${{ steps.patches.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Make a patch for each
+      id: patches
+      shell: bash
+      env:
+        BASES: ${{ inputs.bases }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/other-repositories-changes"
+        mkdir -p "$dir"
+        parent=$(dirname "$GITHUB_WORKSPACE")
+        changed=false
+        while read -r full_name base; do
+          [ -n "$full_name" ] || continue
+          name=${full_name#*/}
+          git -C "$parent/$name" add -A
+          git -C "$parent/$name" diff --cached --binary "$base" -- . ':(exclude).github/workflows' > "$dir/$name.patch"
+          if [ -s "$dir/$name.patch" ]; then
+            echo "$base" > "$dir/$name.base"
+            changed=true
+            echo "Changed $full_name:"
+            git -C "$parent/$name" diff --cached --stat "$base" -- . ':(exclude).github/workflows'
+          else
+            rm "$dir/$name.patch"
+          fi
+          if ! git -C "$parent/$name" diff --cached --quiet "$base" -- .github/workflows; then
+            echo "::warning::Left out the changes to $full_name's workflows, which aren't pushed."
+          fi
+        done <<<"$BASES"
+        echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+    - name: Keep them for the publish job
+      if: steps.patches.outputs.changed == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: other-repositories-changes
+        path: ${{ runner.temp }}/other-repositories-changes
+        retention-days: 1

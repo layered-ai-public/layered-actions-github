@@ -18,9 +18,11 @@ name: Claude
 # for a change. Without one, Claude Code runs its own default.
 #
 # On an issue Layered opened, the app's other repositories are checked out
-# beside this one for Claude to read (see other-repositories/action.yml),
-# when the repository has Layered's LAYERED_URL variable. The app's own
-# workflow has to grant id-token: write for that.
+# beside this one for Claude to read and change (see
+# other-repositories/action.yml), when the repository has Layered's
+# LAYERED_URL variable, and what it changed there is pushed by a job of its
+# own (see publish.yml). The app's own workflow has to grant id-token: write
+# for that.
 #
 # A line `Base: "<branch>"` in an issue starts the work from that branch
 # rather than the default branch: Layered writes one into the issue of a
@@ -65,6 +67,8 @@ jobs:
       # Proves to Layered which repository and workflow this is, for the
       # app's other repositories (see other-repositories/action.yml).
       id-token: write
+    outputs:
+      changed: ${{ steps.hand_over.outputs.changed }}
     steps:
       # An unset secret arrives as an empty string, and the action's own error
       # for that doesn't say where to set one.
@@ -203,3 +207,20 @@ jobs:
             --allowedTools "Bash"
             ${{ steps.add_dirs.outputs.args }}
             ${{ steps.model.outputs.id && format('--model {0}', steps.model.outputs.id) || '' }}
+
+      # What the agent changed in the app's other repositories, for the
+      # publish job to push (see hand-over-changes/action.yml).
+      - name: Hand over the changes to the other repositories
+        if: github.event_name == 'issues' && steps.others.outputs.bases != ''
+        id: hand_over
+        uses: layered-ai-public/layered-actions-github/hand-over-changes@v1
+        with:
+          bases: ${{ steps.others.outputs.bases }}
+
+  # Pushes them, in a job of its own (see publish.yml).
+  publish:
+    needs: claude
+    if: needs.claude.outputs.changed == 'true'
+    permissions:
+      id-token: write
+    uses: layered-ai-public/layered-actions-github/.github/workflows/publish.yml@v1

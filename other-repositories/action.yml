@@ -14,7 +14,9 @@ description: >
 #
 # Each is cloned beside the checkout, in ../<name>, with the token given to
 # the clone only, and revoked once they're cloned, so the agent never holds
-# a token that works. Nothing here fails the run:
+# a token that works. What the agent changes in them is handed over by
+# hand-over-changes, and pushed by the publish workflow, in a job of its own.
+# Nothing here fails the run:
 # without LAYERED_URL, or if Layered says no, the agent works on this
 # repository alone, as before.
 #
@@ -34,6 +36,9 @@ outputs:
   repositories:
     description: "Each repository's owner/name, one to a line."
     value: ${{ steps.clone.outputs.repositories }}
+  bases:
+    description: "Each repository's owner/name and the commit it was checked out at, one to a line, for hand-over-changes."
+    value: ${{ steps.clone.outputs.bases }}
 
 runs:
   using: composite
@@ -77,7 +82,7 @@ runs:
 
         auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
         parent=$(dirname "$GITHUB_WORKSPACE")
-        folders=() repositories=()
+        folders=() repositories=() bases=()
         while read -r repository; do
           full_name=$(jq -r .full_name <<<"$repository")
           name=${full_name#*/}
@@ -88,7 +93,7 @@ runs:
           fi
           folder="$parent/$name"
           if git -c http.extraheader="$auth" clone -q --depth 1 "https://github.com/$full_name.git" "$folder"; then
-            folders+=("$folder") repositories+=("$full_name")
+            folders+=("$folder") repositories+=("$full_name") bases+=("$full_name $(git -C "$folder" rev-parse HEAD)")
             echo "Checked out $full_name in ../$name"
           else
             echo "::warning::Couldn't check out $full_name."
@@ -103,4 +108,5 @@ runs:
         {
           echo "folders<<FOLDERS"; printf '%s\n' "${folders[@]}"; echo "FOLDERS"
           echo "repositories<<REPOSITORIES"; printf '%s\n' "${repositories[@]}"; echo "REPOSITORIES"
+          echo "bases<<BASES"; printf '%s\n' "${bases[@]}"; echo "BASES"
         } >> "$GITHUB_OUTPUT"
