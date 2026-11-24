@@ -64,12 +64,12 @@ jobs:
           token=$(jq -r '.token // empty' <<<"$answer")
           [ -n "$token" ] && echo "::add-mask::$token"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+          branch=$(jq -r .branch <<<"$answer")
+          message=$(jq -r .message <<<"$answer")
 
           failed=0
           while read -r repository; do
             full_name=$(jq -r .full_name <<<"$repository")
-            branch=$(jq -r .branch <<<"$repository")
-            message=$(jq -r .message <<<"$repository")
             name=${full_name#*/}
             patch="$dir/$name.patch"
             [ -f "$patch" ] || continue
