@@ -12,9 +12,10 @@ description: >
 # variable Layered writes, never anything in the issue, which is anyone's who
 # can open one; and Layered, not the issue, says what to check out.
 #
-# Each is cloned beside the checkout, in ../<name>, with the token given to
-# the clone only, and revoked once they're cloned, so the agent never holds
-# a token that works. What the agent changes in them is handed over by
+# Each is cloned beside the checkout, in ../<name>, at the branch Layered
+# names (a build's, for its follow-up) or else the default branch, with the
+# token given to the clone only, and revoked once they're cloned, so the
+# agent never holds a token that works. What the agent changes in them is handed over by
 # hand-over-changes, and pushed by the publish workflow, in a job of its own.
 # Nothing here fails the run:
 # without LAYERED_URL, or if Layered says no, the agent works on this
@@ -92,9 +93,14 @@ runs:
             continue
           fi
           folder="$parent/$name"
-          if git -c http.extraheader="$auth" clone -q --depth 1 "https://github.com/$full_name.git" "$folder"; then
+          ref=$(jq -r '.ref // empty' <<<"$repository")
+          if [[ -n "$ref" && ( ! "$ref" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ || "$ref" == *..* ) ]]; then
+            echo "::warning::Skipped $full_name, whose branch $ref isn't one."
+            continue
+          fi
+          if git -c http.extraheader="$auth" clone -q --depth 1 ${ref:+--branch "$ref"} "https://github.com/$full_name.git" "$folder"; then
             folders+=("$folder") repositories+=("$full_name") bases+=("$full_name $(git -C "$folder" rev-parse HEAD)")
-            echo "Checked out $full_name in ../$name"
+            echo "Checked out $full_name${ref:+ at $ref} in ../$name"
           else
             echo "::warning::Couldn't check out $full_name."
           fi
