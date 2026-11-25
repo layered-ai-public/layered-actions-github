@@ -146,8 +146,18 @@ jobs:
 
       # Codex runs bin/rails, the tests and rubocop as it works, with no
       # network. The tests need what ci.yml's test job installs.
+      #
+      # An app that needs more than one made from layered-foundation does lists
+      # its apt packages in .layered/packages, one a line (see the README).
+      # Only package names are taken from it, never an option to apt.
       - name: Install packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips
+        run: |
+          packages=libvips
+          if [ -f .layered/packages ]; then
+            more=$(sed -e 's/#.*//' .layered/packages | grep -E '^[[:space:]]*[a-z0-9][a-z0-9+.-]*[[:space:]]*$' | tr -s '[:space:]' ' ' || true)
+            packages="$packages $more"
+          fi
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y $packages
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -161,6 +171,15 @@ jobs:
         run: |
           bundle config unset --local deployment
           bundle config set --local frozen false
+
+      # What else the app needs before the agent can run it and its tests, like
+      # a database started and its schema loaded: .layered/setup, when the app
+      # has one (see the README). It's the app's own code, as its Gemfile is,
+      # run with no secrets. What it appends to $GITHUB_ENV is set for the
+      # agent.
+      - name: Run the app's setup
+        if: hashFiles('.layered/setup') != ''
+        run: bash .layered/setup
 
       - name: Start a branch
         id: branch

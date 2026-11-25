@@ -17,6 +17,21 @@ Most are [reusable workflows](https://docs.github.com/en/actions/sharing-automat
 | `codex.yml` | Codex, on an issue mentioning `@codex` |
 | `opencode.yml` | opencode, on a `/opencode` mention |
 
+## An app's own setup
+
+The coding agents' workflows get a checkout ready for an app made from layered-foundation-rails: `libvips`, Ruby and the app's gems. An app that needs more says so with two files in its own repository, both optional:
+
+- **`.layered/packages`** lists apt packages, one a line, with `#` starting a comment. They're installed before the gems are, for a gem that builds against one (`libmagickwand-dev` for `rmagick`, say).
+- **`.layered/setup`** is a script, run with `bash` once the gems are in, as the runner's user, which has `sudo`. It gets the checkout ready for the agent to run the app and its tests: starting a database, creating it, loading its schema. A line it appends to `$GITHUB_ENV` is set for the agent:
+
+  ```sh
+  sudo systemctl start postgresql
+  echo "RAILS_ENV=test" >> "$GITHUB_ENV"
+  bin/rails db:prepare
+  ```
+
+Both are read from the branch the agent starts from. The script is given none of the workflow's secrets, and a failure in it fails the run before the agent starts.
+
 ## Secrets
 
 The coding agents' workflows take the app's repository secrets by name, as `secrets: inherit` only works between repositories with the same owner, and apps aren't owned by this repository's. A new secret has to be declared here and passed by each app's file.
